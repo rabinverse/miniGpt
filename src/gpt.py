@@ -6,17 +6,21 @@ import time
 import mlflow
 from datetime import datetime
 
+import os
+
+
 # Hyperparameters
 block_size = 8  # context length of input
 batch_size = 32  # no of input sequence to process in parallel
-max_iters = 3000
+max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-2
+learning_rate = 1e-3
 device = "cuda" if torch.cuda.is_available() else "cpu"
-# device="mps" if torch.mps.is_available() else "cpu"
+# device = "mps" if torch.mps.is_available() else "cpu"
 eval_iters = 200
 max_new_tokens = 600
 n_embd = 32
+head_size = 32
 
 
 start = time.time()
@@ -35,9 +39,7 @@ vocab_size = len(chars)
 
 # ------------ mlflow
 mlflow.set_experiment("gpt_train")
-run_name = (
-    f"with_posemb_bigram_bs{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-)
+run_name = f"feed_forward_gpt_train_{max_iters}_iteration_{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 mlflow.start_run(run_name=run_name)
 mlflow.log_params(
     {
@@ -49,6 +51,7 @@ mlflow.log_params(
         "n_embd": n_embd,
         "vocab_size": vocab_size,
         "device": device,
+        "head_size": head_size,
     }
 )
 # ------------
@@ -110,6 +113,70 @@ def estimate_loss():
 
 
 # ------------
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)  # (B,T,C)
+        q = self.query(x)  # (B,T,C)
+        # compute attention scores -- affinities
+        wei = (q @ k.transpose(-2, -1)) * C**-0.5  # (B,T,C)@(B,C,T). -->(B,T,T)
+        # tril = torch.tril(torch.ones(T, T))
+        # wei = torch.zeros((T,T))
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        wei = F.softmax(wei, dim=-1)  # (B,T,T)
+        v = self.value(x)  # (B,T,C)
+        # perform weighted aggregation of the values
+        out = wei @ v
+        return out
+
+
+# ------------
+class MultiHeadAttention(nn.Module):
+    "multiple head of self attention in parallel"
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)  # concat in channel dim
+
+
+# ------------
+class FeedForwardNetwork(nn.Module):
+    # a simple linear layer followed by a non linearity
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(n_embd, n_embd), nn.ReLU())
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# ------------
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForwardNetwork(n_embd)
+
+    def forward(self, x):
+        x = self.sa(x)
+        x = self.ffwd(x)
+
+
+# ------------
+# ------------
+# ------------
 
 
 class BigramLanguageModel(nn.Module):
@@ -118,6 +185,10 @@ class BigramLanguageModel(nn.Module):
 
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)  # 65*65
         self.positional_embedding_table = nn.Embedding(block_size, n_embd)
+        # self.sa_head = Head(n_embd)
+        self.sa_head = MultiHeadAttention(4, n_embd // 4)
+        # 4heads of 8-dim self-attention
+        self.ffwd = FeedForwardNetwork(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)  # language modelling head
 
     def forward(self, idx, targets=None):
@@ -132,7 +203,8 @@ class BigramLanguageModel(nn.Module):
         # pos_emb returns # (T,C)
 
         x = tok_emb + pos_emb  # (B,T,C)
-
+        x = self.sa_head(x)  # apply one head of self_attention. (B,T,C)
+        x = self.ffwd(x)  # (B,T,C)
         logits = self.lm_head(x)  # (B,T,C) this C is vocab size
 
         if targets is None:
@@ -154,9 +226,8 @@ class BigramLanguageModel(nn.Module):
             logits, _ = self(idx_cond)
             # returns(batch, time, embedding_dim) ie(B,T,C)->(1,1)->(1,1,65)
             # focus only on the last time step
-            logits = logits[
-                :, -1, :
-            ]  # becomes (B,C) <-last element in the time dim,,,just one time dim so selects that whole tensor(1,1)->(1,1,65)->(1,65)
+            logits = logits[:, -1, :]
+            # logits = logits[:, -1, :] becomes (B,C) <-last element in the time dim,,,just one time dim so selects that whole tensor(1,1)->(1,1,65)->(1,65)
             # applying softmax to get probabilities form logits
             probs = F.softmax(logits, dim=-1)  # (B,C)
             # sample from the distribution
@@ -236,7 +307,7 @@ with open(sample_path, "w", encoding="utf-8") as f:
 
 # Track with MLflow
 mlflow.log_artifact(sample_path)
-
+mlflow.log_metric("time_taken", time.time() - start)
 # ------------
 
 

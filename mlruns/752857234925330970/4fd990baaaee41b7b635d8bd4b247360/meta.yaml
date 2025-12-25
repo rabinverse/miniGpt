@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/rabinpoudel/Documents/code_code_Code/dl/transformer_from_scratch/mlruns/752857234925330970/4fd990baaaee41b7b635d8bd4b247360/artifacts
+end_time: 1766677198417
+entry_point_name: ''
+experiment_id: '752857234925330970'
+lifecycle_stage: active
+run_id: 4fd990baaaee41b7b635d8bd4b247360
+run_name: multiheadapplied_gpt_train_15000_iteration_32_emb32_20251225_212307
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1766677087404
+status: 3
+tags: []
+user_id: rabinpoudel
