@@ -7,24 +7,24 @@ import mlflow
 from datetime import datetime
 
 import os
-
+os.environ["MLFLOW_TRACKING_DISABLE_CODE_SNAPSHOT"] = "true"
 
 # Hyperparameters
 block_size = 8  # context length of input
 batch_size = 32  # no of input sequence to process in parallel
-max_iters = 5000
+max_iters = 1000
 eval_interval = 300
 learning_rate = 1e-3
 device = "cuda" if torch.cuda.is_available() else "cpu"
 # device = "mps" if torch.mps.is_available() else "cpu"
 eval_iters = 200
-max_new_tokens = 600
+max_new_tokens = 1500
 n_embd = 32
 head_size = 32
 
 
-start = time.time()
 # ------------
+start = time.time()
 torch.manual_seed(1337)
 
 with open("./dataset_research_paper_docs/input_text.txt", "r", encoding="utf-8") as f:
@@ -39,7 +39,7 @@ vocab_size = len(chars)
 
 # ------------ mlflow
 mlflow.set_experiment("gpt_train")
-run_name = f"feed_forward_gpt_train_{max_iters}_iteration_{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+run_name = f"blocks&layernorm_gpt_train_{max_iters}_iteration_{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 mlflow.start_run(run_name=run_name)
 mlflow.log_params(
     {
@@ -145,9 +145,13 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)  # concat in channel dim
+        out = torch.cat([h(x) for h in self.heads], dim=-1)  # concat in channel dim
+        out = self.proj(out)
+        #   linear projection of torch.cat([h(x) for h in self.heads], dim=-1) layer
+        return out
 
 
 # ------------
@@ -155,7 +159,9 @@ class FeedForwardNetwork(nn.Module):
     # a simple linear layer followed by a non linearity
     def __init__(self, n_embd):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embd, n_embd), nn.ReLU())
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd), nn.ReLU(), nn.Linear(4 * n_embd, n_embd)
+        )
 
     def forward(self, x):
         return self.net(x)
@@ -168,10 +174,20 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForwardNetwork(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        x = self.sa(x)
-        x = self.ffwd(x)
+
+        # without residual connection
+        # x = self.sa(x)
+        # x = self.ffwd(x)
+
+        # add residual
+        # apply layer norm before sending to self attention and feed forward
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
 
 # ------------
@@ -186,9 +202,15 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)  # 65*65
         self.positional_embedding_table = nn.Embedding(block_size, n_embd)
         # self.sa_head = Head(n_embd)
-        self.sa_head = MultiHeadAttention(4, n_embd // 4)
+        # self.sa_head = MultiHeadAttention(4, n_embd // 4)
         # 4heads of 8-dim self-attention
-        self.ffwd = FeedForwardNetwork(n_embd)
+        # self.ffwd = FeedForwardNetwork(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            nn.LayerNorm(n_embd),
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)  # language modelling head
 
     def forward(self, idx, targets=None):
@@ -203,8 +225,9 @@ class BigramLanguageModel(nn.Module):
         # pos_emb returns # (T,C)
 
         x = tok_emb + pos_emb  # (B,T,C)
-        x = self.sa_head(x)  # apply one head of self_attention. (B,T,C)
-        x = self.ffwd(x)  # (B,T,C)
+        # x = self.sa_head(x)  # apply one head of self_attention. (B,T,C)
+        # x = self.ffwd(x)  # (B,T,C)
+        x = self.blocks(x)  # (B,T,C)
         logits = self.lm_head(x)  # (B,T,C) this C is vocab size
 
         if targets is None:
@@ -298,7 +321,8 @@ context = torch.zeros((1, 1), dtype=torch.long, device=device)
 generated_text = decode_txt(
     m.generate(context, max_new_tokens=max_new_tokens)[0].tolist()
 )
-print(generated_text)
+for a in generated_text:
+    print(generated_text)
 
 # ------------
 sample_path = "./dataset_research_paper_docs/generated_text.txt"
@@ -317,7 +341,7 @@ mlflow.log_metric("time_taken", time.time() - start)
 # ------------
 
 
-# ------------
+# ------------ 
 
 
 # ------------
