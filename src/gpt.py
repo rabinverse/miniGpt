@@ -3,29 +3,30 @@ import torch.nn as nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import time
-import mlflow
 from datetime import datetime
+import mlflow
 
-import os
-os.environ["MLFLOW_TRACKING_DISABLE_CODE_SNAPSHOT"] = "true"
+
 
 # Hyperparameters
-block_size = 8  # context length of input
-batch_size = 32  # no of input sequence to process in parallel
-max_iters = 1000
+block_size = 256  # context length of input
+batch_size = 64  # no of input sequence to process in parallel
+max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-3
+learning_rate = 3e-4
 device = "cuda" if torch.cuda.is_available() else "cpu"
 # device = "mps" if torch.mps.is_available() else "cpu"
 eval_iters = 200
-max_new_tokens = 1500
-n_embd = 32
+n_embd = 384
 head_size = 32
+n_layer = 6
+n_head = 6  # 384/6=64 -every head is of 64 dim
+dropout = 0.3  # 30%dropout
+max_new_tokens = 5000
 
 
 # ------------
-start = time.time()
-torch.manual_seed(1337)
+torch.manual_seed(42)
 
 with open("./dataset_research_paper_docs/input_text.txt", "r", encoding="utf-8") as f:
     text = f.read()
@@ -39,7 +40,7 @@ vocab_size = len(chars)
 
 # ------------ mlflow
 mlflow.set_experiment("gpt_train")
-run_name = f"blocks&layernorm_gpt_train_{max_iters}_iteration_{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+run_name = f"before_bulk_parameter_added dropout_gpt_train_{max_iters}_iteration_{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 mlflow.start_run(run_name=run_name)
 mlflow.log_params(
     {
@@ -122,6 +123,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x)  # (B,T,C)
@@ -130,10 +133,12 @@ class Head(nn.Module):
         wei = (q @ k.transpose(-2, -1)) * C**-0.5  # (B,T,C)@(B,C,T). -->(B,T,T)
         # tril = torch.tril(torch.ones(T, T))
         # wei = torch.zeros((T,T))
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # type: ignore
         wei = F.softmax(wei, dim=-1)  # (B,T,T)
+        wei = self.dropout(wei)
+        #
         v = self.value(x)  # (B,T,C)
-        # perform weighted aggregation of the values
+        # perform weighted aggregation of the values calculating affinity
         out = wei @ v
         return out
 
@@ -146,10 +151,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)  # concat in channel dim
         out = self.proj(out)
+        out = self.dropout(out)
         #   linear projection of torch.cat([h(x) for h in self.heads], dim=-1) layer
         return out
 
@@ -160,7 +167,10 @@ class FeedForwardNetwork(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd), nn.ReLU(), nn.Linear(4 * n_embd, n_embd)
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -206,11 +216,9 @@ class BigramLanguageModel(nn.Module):
         # 4heads of 8-dim self-attention
         # self.ffwd = FeedForwardNetwork(n_embd)
         self.blocks = nn.Sequential(
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            nn.LayerNorm(n_embd),
+            *[Block(n_embd, n_head=n_head) for _ in range(n_layer)]
         )
+        self.ln_f = nn.LayerNorm(n_embd)  # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)  # language modelling head
 
     def forward(self, idx, targets=None):
@@ -220,7 +228,7 @@ class BigramLanguageModel(nn.Module):
 
         tok_emb = self.token_embedding_table(idx)
         # tok_emb becomes (B,T,C)ie(4,8,n_embd) c is n_embd
-        # ---add posembedding to the token embedding
+        # ---add pos_embedding to the token embedding
         pos_emb = self.positional_embedding_table(torch.arange(T, device=device))
         # pos_emb returns # (T,C)
 
@@ -228,6 +236,7 @@ class BigramLanguageModel(nn.Module):
         # x = self.sa_head(x)  # apply one head of self_attention. (B,T,C)
         # x = self.ffwd(x)  # (B,T,C)
         x = self.blocks(x)  # (B,T,C)
+        x = self.ln_f(x)  # (B,T,C)
         logits = self.lm_head(x)  # (B,T,C) this C is vocab size
 
         if targets is None:
@@ -285,7 +294,7 @@ m = model.to(device)
 
 # ------------
 
-optimizer = torch.optim.Adam(m.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(m.parameters(), lr=learning_rate)
 
 
 # ------------
@@ -321,8 +330,8 @@ context = torch.zeros((1, 1), dtype=torch.long, device=device)
 generated_text = decode_txt(
     m.generate(context, max_new_tokens=max_new_tokens)[0].tolist()
 )
-for a in generated_text:
-    print(generated_text)
+# generated_text
+
 
 # ------------
 sample_path = "./dataset_research_paper_docs/generated_text.txt"
@@ -331,7 +340,6 @@ with open(sample_path, "w", encoding="utf-8") as f:
 
 # Track with MLflow
 mlflow.log_artifact(sample_path)
-mlflow.log_metric("time_taken", time.time() - start)
 # ------------
 
 
@@ -341,18 +349,20 @@ mlflow.log_metric("time_taken", time.time() - start)
 # ------------
 
 
-# ------------ 
-
-
 # ------------
+
 
 mlflow.end_run()
+
 # ------------
-
-# step 29700: training loss 2.4542,val loss 2.4862. time 20.746973037719727
-# step 29700: training loss 2.4542,val loss 2.4862 tm 67.80790400505066 gp
-
-# step 2700: training loss 2.8731,val loss 2.8799
-# step 2700: training loss 2.4959,val loss 2.5076
-
-print("*" * 20, "The end", time.time() - start)
+# block_size = 8  # context length of input
+# batch_size = 32  # no of input sequence to process in parallel
+# max_iters = 1000
+# eval_interval = 300
+# learning_rate = 1e-3
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+# # device = "mps" if torch.mps.is_available() else "cpu"
+# eval_iters = 200
+# max_new_tokens = 1500
+# n_embd = 32
+# head_size = 32
