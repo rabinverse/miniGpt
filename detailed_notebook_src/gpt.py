@@ -3,8 +3,10 @@ import torch.nn as nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import time
-from datetime import datetime
 import mlflow
+from datetime import datetime
+
+import os
 
 
 # Hyperparameters
@@ -20,11 +22,12 @@ n_embd = 384
 head_size = 32
 n_layer = 6
 n_head = 6  # 384/6=64 -every head is of 64 dim
-dropout = 0.3  # 30%dropout
+dropout = 0.3  # 20%dropout
 max_new_tokens = 5000
 
 
 # ------------
+start = time.time()
 torch.manual_seed(42)
 
 with open("./dataset_research_paper_docs/input_text.txt", "r", encoding="utf-8") as f:
@@ -96,10 +99,7 @@ def get_batch(split):
 
 # xb, yb = get_batch("train")
 # xb is the input to the transformer
-
-
 # ------------
-#   def forward(self, idx, targets=None):
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -123,7 +123,6 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
-        # masking
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
 
         self.dropout = nn.Dropout(dropout)
@@ -134,8 +133,9 @@ class Head(nn.Module):
         q = self.query(x)  # (B,T,C)
         # compute attention scores -- affinities
         wei = (q @ k.transpose(-2, -1)) * C**-0.5  # (B,T,C)@(B,C,T). -->(B,T,T)
-        # masking
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # type: ignore
+        # tril = torch.tril(torch.ones(T, T))
+        # wei = torch.zeros((T,T))
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf")) # type: ignore
         wei = F.softmax(wei, dim=-1)  # (B,T,T)
         wei = self.dropout(wei)
         #
@@ -159,14 +159,13 @@ class MultiHeadAttention(nn.Module):
         out = torch.cat([h(x) for h in self.heads], dim=-1)  # concat in channel dim
         out = self.proj(out)
         out = self.dropout(out)
-        #   linear projection of torch.cat([h(x) for h in self.heads], dim=-1) layer
+        #   linear projection of torch.cat([h(x) for h in self.heads], dim=-1) layer -- learned interaction across heads
         return out
 
 
 # ------------
 class FeedForwardNetwork(nn.Module):
     # a simple linear layer followed by a non linearity
-    # from papaer--The dimensionality of input and output is ( d_{model} = 512 ), and the inner-layer has dimensionality ( d_{ff} = 2048 ).
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
@@ -227,8 +226,10 @@ class BigramLanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
+        # idx and target are both (B,T)tensor of integer B-batch ,T-time/block_size/context length, C-channel. (here b=4,T=8,C=vocabsize ie 65)
+
         tok_emb = self.token_embedding_table(idx)
-        # tok_emb becomes (B,T,C)
+        # tok_emb becomes (B,T,C)ie(4,8,n_embd) c is n_embd
         # ---add pos_embedding to the token embedding
         pos_emb = self.positional_embedding_table(torch.arange(T, device=device))
         # pos_emb returns # (T,C)
@@ -244,36 +245,55 @@ class BigramLanguageModel(nn.Module):
             loss = None
         else:
             B, T, C = logits.shape
-            logits = logits.view(B * T, C)  #  stretching the vec
+            logits = logits.view(B * T, C)  # (32*65) stretching the vec
             targets = targets.view(B * T)  # (32)
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
-        # takes (B,T) and generate fn generates (b,T+1,T+2,... )ie generate new token in time dim ie(contextlength dim)
-        # idx is (B,T) array of indices
+        # takes (B,T) and generate work is to generate (b,T+1,T+2)ie generate new token in time dim ie(contextlength dim)
+        # idx is (B,T) array of indices in the current context(1,1)
         for _ in range(max_new_tokens):
             #   get new prediction
             idx_cond = idx[:, -block_size:]
             logits, _ = self(idx_cond)
             # returns(batch, time, embedding_dim) ie(B,T,C)->(1,1)->(1,1,65)
-            # next focus only on the last time step
+            # focus only on the last time step
             logits = logits[:, -1, :]
-            # logits = logits[:, -1, :] becomes (B,C) <-last element in the time dim
+            # logits = logits[:, -1, :] becomes (B,C) <-last element in the time dim,,,just one time dim so selects that whole tensor(1,1)->(1,1,65)->(1,65)
+            # applying softmax to get probabilities form logits
             probs = F.softmax(logits, dim=-1)  # (B,C)
             # sample from the distribution
             idx_next = torch.multinomial(
                 probs, num_samples=1
-            )  # (B,1)ie(1,1)selects any one token from the probability values from C dim
+            )  # (B,1)ie(1,1)selects any one token from the probability values from 65 of them
             idx = torch.cat((idx, idx_next), dim=1)  # (B,T+1)
-            #  next = idx=[31,32,+...]
+            # eg next = idx=[31,32]
         return idx
 
 
 model = BigramLanguageModel()
 m = model.to(device)
-#   def forward(self, idx, targets=None):
+# logits, loss = m(xb, yb)
+# print("logits", logits.shape, "\n loss= ", loss)
+
+
+# --------
+# generate
+# idx = torch.zeros((1, 1), dtype=torch.long)
+# 0 index in vocab represents \n
+# PyTorch expects a batch dimension in tensors, so even a single sequence must be shaped as (B, T) rather than just (T).
+# print("idx begin------")
+# print("idx=", idx)
+# print("idxshape", idx.shape)
+# ret_idx = m.generate(idx, max_new_tokens=100)[0].tolist()
+# print("ret_idx=", ret_idx)
+# print("len=", len(ret_idx))
+# print("----\n generated_text -> ", decode_txt(ret_idx))
+# print(m.generate(torch.zeros((1, 1), dtype=torch.long), max_new_tokens=100)[0].tolist())
+
+
 # ------------
 
 optimizer = torch.optim.Adam(m.parameters(), lr=learning_rate)
@@ -299,7 +319,6 @@ for iter in tqdm(range(max_iters), desc="Training"):
     # sample a batch of data
     xb, yb = get_batch("train")
 
-    #   def forward(self, idx, targets=None):
     # evaluate the loss
     logits, loss = m(xb, yb)
 
@@ -309,11 +328,11 @@ for iter in tqdm(range(max_iters), desc="Training"):
 
 
 # ------------
-# generated_text
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 generated_text = decode_txt(
     m.generate(context, max_new_tokens=max_new_tokens)[0].tolist()
 )
+# generated_text
 
 
 # ------------
@@ -321,9 +340,24 @@ sample_path = "./dataset_research_paper_docs/generated_text.txt"
 with open(sample_path, "w", encoding="utf-8") as f:
     f.write(generated_text)
 
-
-# ------------
+# Track with MLflow
 mlflow.log_artifact(sample_path)
+mlflow.log_metric("time_taken", time.time() - start)
+# ------------
+
+
+
 mlflow.end_run()
 
 # ------------
+# block_size = 8  # context length of input
+# batch_size = 32  # no of input sequence to process in parallel
+# max_iters = 1000
+# eval_interval = 300
+# learning_rate = 1e-3
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+# # device = "mps" if torch.mps.is_available() else "cpu"
+# eval_iters = 200
+# max_new_tokens = 1500
+# n_embd = 32
+# head_size = 32

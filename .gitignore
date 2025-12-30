@@ -190,3 +190,6 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 none
+mlflow.db
+mlflow-export
+mlruns
