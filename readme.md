@@ -139,12 +139,11 @@ The model generates text autoregressively, sampling from the probability distrib
 
 ```
 .
-├── train.py                          # Main training script
 ├── dataset_research_paper_docs/
 │   ├── input_text.txt               # Training data
 │   └── generated_text.txt           # Generated samples
-├──src/
-│   ├── gpt.py                      # GPT model implementation
+|
+├── gpt.py                      # Main training script
 ├── notebooks
 └── mlruns/                          # MLflow experiment logs
 ```
