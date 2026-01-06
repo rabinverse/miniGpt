@@ -31,7 +31,7 @@ st.session_state.prompt = st.text_area(
 
 #  tokens slider
 if "max_tokens" not in st.session_state:
-    st.session_state.max_tokens = 500
+    st.session_state.max_tokens = 250
 st.session_state.max_tokens = st.slider(
     "Max new tokens to generate:", 50, 950, st.session_state.max_tokens,help="This project uses character level tokenization"
 )
