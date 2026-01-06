@@ -4,7 +4,6 @@ from torch.nn import functional as F
 from tqdm import tqdm
 import time
 from datetime import datetime
-import mlflow
 
 
 # Hyperparameters
@@ -37,23 +36,7 @@ chars = sorted(list(set(text)))
 vocab_size = len(chars)
 
 
-# ------------ mlflow
-mlflow.set_experiment("gpt_train")
-run_name = f"before_bulk_parameter_added dropout_gpt_train_{max_iters}_iteration_{batch_size}_emb{n_embd}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-mlflow.start_run(run_name=run_name)
-mlflow.log_params(
-    {
-        "block_size": block_size,
-        "batch_size": batch_size,
-        "max_iters": max_iters,
-        "eval_interval": eval_interval,
-        "learning_rate": learning_rate,
-        "n_embd": n_embd,
-        "vocab_size": vocab_size,
-        "device": device,
-        "head_size": head_size,
-    }
-)
+
 # ------------
 
 
@@ -323,7 +306,5 @@ with open(sample_path, "w", encoding="utf-8") as f:
 
 
 # ------------
-mlflow.log_artifact(sample_path)
-mlflow.end_run()
 
 # ------------
